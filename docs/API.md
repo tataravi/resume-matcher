@@ -109,7 +109,7 @@ GET /health/
   "services": {
     "database": {"status": "healthy", "response_time_ms": 5.2},
     "redis": {"status": "healthy", "response_time_ms": 1.8},
-    "deepseek_api": {"status": "healthy", "response_time_ms": 150.0}
+    "claude_api": {"status": "healthy", "response_time_ms": 150.0}
   },
   "system": {
     "cpu_usage_percent": 45.2,

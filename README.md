@@ -4,7 +4,7 @@ An AI agent-based resume analysis system built with FastAPI, featuring automated
 
 ## 🚀 Features
 
-- **AI-Powered Analysis**: Advanced resume parsing and job matching using DeepSeek LLM
+- **AI-Powered Analysis**: Advanced resume parsing and job matching using Claude AI
 - **Agent Architecture**: Modular design with specialized agents for different tasks
 - **Real-time Processing**: WebSocket support for live analysis updates
 - **Cloud-Ready**: AWS integration with S3, DynamoDB, SQS, and Lambda
@@ -49,7 +49,7 @@ An AI agent-based resume analysis system built with FastAPI, featuring automated
 - **AsyncIO**: Asynchronous programming support
 
 ### AI & ML
-- **DeepSeek API**: Advanced language model for text analysis
+- **Claude API**: Advanced language model for text analysis
 - **Custom Agents**: Modular AI agent architecture
 - **Structured Output**: JSON schema validation for LLM responses
 
@@ -206,7 +206,7 @@ resume-analyzer/
 │   │   ├── models.py            # Pydantic models
 │   │   └── base_agent.py        # Base agent class
 │   ├── services/                 # External service integrations
-│   │   ├── llm_service.py       # DeepSeek LLM integration
+│   │   ├── llm_service.py       # Claude LLM integration
 │   │   ├── s3_service.py        # AWS S3 integration
 │   │   ├── dynamodb_service.py  # DynamoDB integration
 │   │   └── sqs_service.py       # SQS integration
@@ -372,9 +372,9 @@ AWS_S3_BUCKET=your-bucket
 AWS_DYNAMODB_TABLE=your-table
 AWS_SQS_QUEUE_URL=https://sqs.region.amazonaws.com/account/queue
 
-# DeepSeek API
-DEEPSEEK_API_KEY=your-api-key
-DEEPSEEK_MODEL=deepseek-chat
+# Claude API
+CLAUDE_API_KEY=your-api-key
+CLAUDE_MODEL=claude-3-5-sonnet-20241022
 ```
 
 ## 📊 Monitoring
@@ -554,8 +554,8 @@ docker-compose logs resume-analyzer | grep -i "memory\|oom"
 curl "http://localhost:8000/metrics" | grep llm
 
 # Verify API key and configuration
-curl -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-  "https://api.deepseek.com/v1/models"
+curl -H "x-api-key: $CLAUDE_API_KEY" \
+  "https://api.anthropic.com/v1/models"
 ```
 
 ### Debug Mode
@@ -583,7 +583,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - **FastAPI**: For the excellent web framework
-- **DeepSeek**: For providing advanced LLM capabilities
+- **Claude/Anthropic**: For providing advanced LLM capabilities
 - **AWS**: For cloud infrastructure services
 - **Open Source Community**: For all the amazing tools and libraries
 

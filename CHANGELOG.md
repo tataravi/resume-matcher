@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial project setup and architecture
 - FastAPI backend with async processing
 - Modular AI agent architecture
-- DeepSeek LLM integration
+- Claude AI integration for intelligent resume analysis
 - AWS services integration (S3, DynamoDB, SQS)
 - Docker containerization with multi-stage builds
 - Terraform infrastructure as code

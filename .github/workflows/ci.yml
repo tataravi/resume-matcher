@@ -74,7 +74,7 @@ jobs:
         cp .env.example .env
         echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_db" >> .env
         echo "REDIS_URL=redis://localhost:6379/0" >> .env
-        echo "DEEPSEEK_API_KEY=test-key" >> .env
+        echo "CLAUDE_API_KEY=test-key" >> .env
         echo "AWS_ACCESS_KEY_ID=test" >> .env
         echo "AWS_SECRET_ACCESS_KEY=test" >> .env
         echo "SECRET_KEY=test-secret-key" >> .env

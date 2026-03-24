@@ -20,7 +20,7 @@ services:
       - AWS_S3_BUCKET=resume-analyzer-uploads
       - AWS_DYNAMODB_TABLE=resume-analysis-results
       - AWS_SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/resume-analysis
-      - DEEPSEEK_API_KEY=test-deepseek-api-key
+      - CLAUDE_API_KEY=test-claude-api-key
     depends_on:
       - postgres
       - redis
