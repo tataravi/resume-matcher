@@ -1,0 +1,365 @@
+name: Security Scans
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # Dependency vulnerability scanning
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      
+    - name: Export requirements
+      run: |
+        poetry export -f requirements.txt --output requirements.txt --dev
+        
+    - name: Run Safety check
+      run: |
+        pip install safety
+        safety check -r requirements.txt --json --output safety-report.json || true
+        
+    - name: Run pip-audit
+      run: |
+        pip install pip-audit
+        pip-audit -r requirements.txt --format=json --output=pip-audit-report.json || true
+        
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: dependency-scan-results
+        path: |
+          safety-report.json
+          pip-audit-report.json
+
+  # Code security analysis
+  code-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Bandit security linter
+      run: |
+        pip install bandit[toml]
+        bandit -r src/ -f json -o bandit-report.json || true
+        bandit -r src/ -f txt -o bandit-report.txt || true
+        
+    - name: Run Semgrep
+      uses: semgrep/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/owasp-top-ten
+          p/python
+        generateSarif: "1"
+        
+    - name: Upload Semgrep results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: semgrep.sarif
+        
+    - name: Upload code scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: code-scan-results
+        path: |
+          bandit-report.json
+          bandit-report.txt
+          semgrep.sarif
+
+  # Secret scanning
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+        
+    - name: Run detect-secrets
+      run: |
+        pip install detect-secrets
+        detect-secrets scan --all-files --baseline .secrets.baseline || true
+        
+    - name: Upload secret scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: secret-scan-results
+        path: .secrets.baseline
+
+  # Container security scanning
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Build Docker image
+      run: |
+        docker build -t resume-analyzer:security-scan .
+        
+    - name: Run Trivy container scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'resume-analyzer:security-scan'
+        format: 'sarif'
+        output: 'trivy-container.sarif'
+        
+    - name: Run Grype container scan
+      uses: anchore/scan-action@v3
+      with:
+        image: 'resume-analyzer:security-scan'
+        fail-build: false
+        severity-cutoff: high
+        
+    - name: Upload container scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-container.sarif'
+
+  # Infrastructure security scanning
+  infrastructure-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Checkov on Terraform
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: terraform/
+        framework: terraform
+        output_format: sarif
+        output_file_path: checkov-terraform.sarif
+        
+    - name: Run Checkov on Dockerfile
+      uses: bridgecrewio/checkov-action@master
+      with:
+        file: Dockerfile
+        framework: dockerfile
+        output_format: sarif
+        output_file_path: checkov-dockerfile.sarif
+        
+    - name: Run Checkov on Docker Compose
+      uses: bridgecrewio/checkov-action@master
+      with:
+        file: docker-compose.yml
+        framework: docker_compose
+        output_format: sarif
+        output_file_path: checkov-compose.sarif
+        
+    - name: Run TFSec
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        working_directory: terraform/
+        format: sarif
+        sarif_file: tfsec.sarif
+        
+    - name: Upload infrastructure scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: |
+          checkov-terraform.sarif
+          checkov-dockerfile.sarif
+          checkov-compose.sarif
+          tfsec.sarif
+
+  # License compliance
+  license-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      
+    - name: Install dependencies
+      run: poetry install --no-interaction --no-ansi
+      
+    - name: Generate license report
+      run: |
+        pip install pip-licenses
+        poetry export -f requirements.txt --output requirements.txt
+        pip install -r requirements.txt
+        
+        # Generate license report
+        pip-licenses --format json --output-file licenses.json
+        pip-licenses --format html --output-file licenses.html
+        
+        # Check for problematic licenses
+        pip-licenses --format json | jq -r '.[] | select(.License | test("GPL|AGPL")) | .Name' > gpl_packages.txt
+        
+        if [ -s gpl_packages.txt ]; then
+          echo "❌ GPL-licensed packages found:"
+          cat gpl_packages.txt
+          exit 1
+        else
+          echo "✅ No problematic licenses found"
+        fi
+        
+    - name: Upload license report
+      uses: actions/upload-artifact@v3
+      with:
+        name: license-report
+        path: |
+          licenses.json
+          licenses.html
+
+  # Security summary report
+  security-report:
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, code-scan, secret-scan, container-scan, infrastructure-scan, license-scan]
+    if: always()
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      
+    - name: Generate security summary
+      run: |
+        echo "# Security Scan Summary" > security-summary.md
+        echo "" >> security-summary.md
+        echo "Generated on: $(date -u)" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        echo "## Scan Results" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        # Check each scan result
+        if [ "${{ needs.dependency-scan.result }}" == "success" ]; then
+          echo "✅ Dependency Scan: PASSED" >> security-summary.md
+        else
+          echo "❌ Dependency Scan: FAILED" >> security-summary.md
+        fi
+        
+        if [ "${{ needs.code-scan.result }}" == "success" ]; then
+          echo "✅ Code Security Scan: PASSED" >> security-summary.md
+        else
+          echo "❌ Code Security Scan: FAILED" >> security-summary.md
+        fi
+        
+        if [ "${{ needs.secret-scan.result }}" == "success" ]; then
+          echo "✅ Secret Scan: PASSED" >> security-summary.md
+        else
+          echo "❌ Secret Scan: FAILED" >> security-summary.md
+        fi
+        
+        if [ "${{ needs.container-scan.result }}" == "success" ]; then
+          echo "✅ Container Scan: PASSED" >> security-summary.md
+        else
+          echo "❌ Container Scan: FAILED" >> security-summary.md
+        fi
+        
+        if [ "${{ needs.infrastructure-scan.result }}" == "success" ]; then
+          echo "✅ Infrastructure Scan: PASSED" >> security-summary.md
+        else
+          echo "❌ Infrastructure Scan: FAILED" >> security-summary.md
+        fi
+        
+        if [ "${{ needs.license-scan.result }}" == "success" ]; then
+          echo "✅ License Compliance: PASSED" >> security-summary.md
+        else
+          echo "❌ License Compliance: FAILED" >> security-summary.md
+        fi
+        
+        echo "" >> security-summary.md
+        echo "## Recommendations" >> security-summary.md
+        echo "" >> security-summary.md
+        echo "- Review all failed scans and address identified issues" >> security-summary.md
+        echo "- Update dependencies with known vulnerabilities" >> security-summary.md
+        echo "- Follow security best practices in code development" >> security-summary.md
+        echo "- Regularly update base Docker images" >> security-summary.md
+        echo "- Monitor for new security advisories" >> security-summary.md
+        
+    - name: Upload security summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-summary
+        path: security-summary.md
+        
+    - name: Create security issue on failure
+      if: failure() && github.event_name == 'schedule'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const title = `Security Scan Failures - ${new Date().toISOString().split('T')[0]}`;
+          const body = `
+          Automated security scans have detected issues that require attention.
+          
+          **Failed Scans:**
+          - Dependency Scan: ${{ needs.dependency-scan.result }}
+          - Code Scan: ${{ needs.code-scan.result }}
+          - Secret Scan: ${{ needs.secret-scan.result }}
+          - Container Scan: ${{ needs.container-scan.result }}
+          - Infrastructure Scan: ${{ needs.infrastructure-scan.result }}
+          - License Scan: ${{ needs.license-scan.result }}
+          
+          Please review the scan results and address any identified security issues.
+          
+          **Actions Required:**
+          - [ ] Review scan artifacts
+          - [ ] Fix identified vulnerabilities
+          - [ ] Update dependencies if needed
+          - [ ] Verify infrastructure security
+          
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          `;
+          
+          await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: title,
+            body: body,
+            labels: ['security', 'high-priority']
+          });
+
+  # Notify security team
+  notify-security:
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, code-scan, secret-scan, container-scan, infrastructure-scan, license-scan]
+    if: failure() && github.event_name == 'schedule'
+    steps:
+    - name: Send security alert
+      run: |
+        # Send notification to security team
+        # This could be Slack, email, PagerDuty, etc.
+        echo "🚨 Security scan failures detected in resume-analyzer"
+        echo "Immediate review required"
+        echo "Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

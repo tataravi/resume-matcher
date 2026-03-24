@@ -1,0 +1,137 @@
+# General Configuration
+project_name = "resume-analyzer"
+environment  = "dev"  # dev, staging, prod
+aws_region   = "us-east-1"
+
+# VPC Configuration
+vpc_cidr           = "10.0.0.0/16"
+availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+public_subnets     = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnets    = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+
+# S3 Configuration
+create_resume_bucket = true
+create_logs_bucket   = true
+
+# Application Configuration
+app_image         = "your-account.dkr.ecr.us-east-1.amazonaws.com/resume-analyzer:latest"
+app_port          = 8000
+app_cpu           = 512      # 0.5 vCPU
+app_memory        = 1024     # 1 GB
+app_desired_count = 2
+
+# Auto Scaling Configuration
+enable_autoscaling         = true
+min_capacity              = 1
+max_capacity              = 10
+target_cpu_utilization    = 70
+
+# SSL Certificate (create in ACM first)
+certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/your-certificate-id"
+domain_name     = "resume-analyzer.yourdomain.com"
+
+# Database Configuration
+db_engine_version           = "15.4"
+db_instance_class          = "db.t3.micro"     # Use db.t3.small or larger for production
+db_allocated_storage       = 20
+db_storage_encrypted       = true
+db_name                    = "resume_analyzer"
+db_username                = "postgres"
+db_backup_retention_period = 7
+db_backup_window          = "03:00-04:00"
+db_maintenance_window     = "sun:04:00-sun:05:00"
+db_monitoring_interval    = 60
+
+# Redis Configuration
+redis_node_type                = "cache.t3.micro"  # Use cache.t3.small or larger for production
+redis_num_nodes               = 1
+redis_parameter_group         = "default.redis7"
+redis_auth_token_enabled      = true
+redis_snapshot_retention_limit = 5
+redis_snapshot_window         = "03:00-05:00"
+
+# DynamoDB Configuration
+dynamodb_tables = {
+  "resume-analysis-results" = {
+    hash_key  = "analysis_id"
+    range_key = "user_id"
+    
+    attributes = [
+      { name = "analysis_id", type = "S" },
+      { name = "user_id", type = "S" },
+      { name = "created_at", type = "S" }
+    ]
+    
+    global_secondary_indexes = [
+      {
+        name     = "user-created-index"
+        hash_key = "user_id"
+        range_key = "created_at"
+      }
+    ]
+  }
+  
+  "user-sessions" = {
+    hash_key = "session_id"
+    
+    attributes = [
+      { name = "session_id", type = "S" }
+    ]
+  }
+}
+
+# SQS Configuration
+sqs_queues = {
+  "resume-analysis" = {
+    visibility_timeout_seconds = 300        # 5 minutes (should be > Lambda timeout)
+    message_retention_seconds  = 1209600    # 14 days
+    dlq_enabled               = true
+    dlq_max_receive_count     = 3
+  }
+  
+  "feedback-generation" = {
+    visibility_timeout_seconds = 180        # 3 minutes
+    message_retention_seconds  = 604800     # 7 days
+    dlq_enabled               = true
+    dlq_max_receive_count     = 5
+  }
+}
+
+# Lambda Configuration
+lambda_functions = {
+  "resume-processor" = {
+    filename      = "../lambda/resume_processor.zip"
+    function_name = "resume-processor"
+    handler      = "main.lambda_handler"
+    runtime      = "python3.11"
+    memory_size  = 512
+    timeout      = 300  # 5 minutes
+    
+    environment_vars = {
+      LOG_LEVEL = "INFO"
+    }
+    
+    sqs_trigger = {
+      queue_name = "resume-analysis"
+      batch_size = 5
+    }
+  }
+}
+
+# Monitoring Configuration
+sns_topic_arn = "arn:aws:sns:us-east-1:123456789012:alerts"
+cloudwatch_alarm_actions = [
+  "arn:aws:sns:us-east-1:123456789012:alerts"
+]
+
+# Route53 Configuration (optional)
+create_route53_records = false
+hosted_zone_id        = "Z123456789012345"  # Your hosted zone ID
+
+# Environment-specific overrides
+# For production, consider:
+# - Larger instance sizes (db.t3.small+, cache.t3.small+)
+# - Multi-AZ RDS deployment
+# - Multiple Redis nodes for high availability
+# - Higher CPU/memory allocations for ECS tasks
+# - Increased min/max capacity for auto scaling

@@ -1,0 +1,426 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: '3.11'
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: resume-analyzer
+  ECS_SERVICE: resume-analyzer-prod
+  ECS_CLUSTER: resume-analyzer-prod
+
+jobs:
+  # Code Quality and Testing
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: latest
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+        
+    - name: Load cached venv
+      id: cached-poetry-dependencies
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+        
+    - name: Install dependencies
+      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+      run: poetry install --no-interaction --no-ansi
+      
+    - name: Set up environment
+      run: |
+        cp .env.example .env
+        echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_db" >> .env
+        echo "REDIS_URL=redis://localhost:6379/0" >> .env
+        echo "DEEPSEEK_API_KEY=test-key" >> .env
+        echo "AWS_ACCESS_KEY_ID=test" >> .env
+        echo "AWS_SECRET_ACCESS_KEY=test" >> .env
+        echo "SECRET_KEY=test-secret-key" >> .env
+        
+    - name: Run linting
+      run: |
+        poetry run black --check src/ tests/
+        poetry run isort --check-only src/ tests/
+        poetry run flake8 src/ tests/
+        
+    - name: Run type checking
+      run: poetry run mypy src/
+      
+    - name: Run tests
+      run: |
+        poetry run pytest tests/ \
+          --cov=src \
+          --cov-report=xml \
+          --cov-report=html \
+          --junit-xml=pytest-report.xml
+          
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: |
+          pytest-report.xml
+          htmlcov/
+          
+  # Security Scanning
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+        
+    - name: Run Safety security check
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json || true
+        
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-results
+        path: |
+          trivy-results.sarif
+          safety-report.json
+          
+  # Build and Push Docker Image
+  build:
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64
+        
+    - name: Run Trivy container scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-container-results.sarif'
+        
+    - name: Upload container scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-container-results.sarif'
+        
+  # Deploy to Staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      
+    - name: Deploy to ECS Staging
+      run: |
+        # Update ECS service with new image
+        aws ecs update-service \
+          --cluster resume-analyzer-staging \
+          --service resume-analyzer-staging \
+          --force-new-deployment \
+          --task-definition resume-analyzer-staging
+          
+    - name: Wait for deployment
+      run: |
+        aws ecs wait services-stable \
+          --cluster resume-analyzer-staging \
+          --services resume-analyzer-staging
+          
+    - name: Run deployment tests
+      run: |
+        # Wait for service to be available
+        sleep 60
+        
+        # Get load balancer URL
+        ALB_URL=$(aws elbv2 describe-load-balancers \
+          --names resume-analyzer-staging-alb \
+          --query 'LoadBalancers[0].DNSName' \
+          --output text)
+        
+        # Basic health check
+        curl -f "https://${ALB_URL}/health/live" || exit 1
+        
+        # API availability check
+        curl -f "https://${ALB_URL}/docs" || exit 1
+        
+  # Deploy to Production
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      
+    - name: Deploy to ECS Production
+      run: |
+        # Create new task definition revision
+        TASK_DEFINITION=$(aws ecs describe-task-definition \
+          --task-definition ${{ env.ECS_SERVICE }} \
+          --query taskDefinition)
+        
+        # Update image URI in task definition
+        NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq --arg IMAGE "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" \
+          '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.placementConstraints) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
+        
+        # Register new task definition
+        NEW_TASK_DEF_ARN=$(echo $NEW_TASK_DEFINITION | aws ecs register-task-definition \
+          --cli-input-json file:///dev/stdin \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text)
+        
+        # Update ECS service
+        aws ecs update-service \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --service ${{ env.ECS_SERVICE }} \
+          --task-definition $NEW_TASK_DEF_ARN
+          
+    - name: Wait for deployment
+      run: |
+        aws ecs wait services-stable \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }}
+          
+    - name: Run smoke tests
+      run: |
+        # Wait for service to be fully available
+        sleep 120
+        
+        # Get load balancer URL from environment or AWS
+        ALB_URL="${{ secrets.PRODUCTION_ALB_URL }}"
+        if [ -z "$ALB_URL" ]; then
+          ALB_URL=$(aws elbv2 describe-load-balancers \
+            --names resume-analyzer-prod-alb \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+        fi
+        
+        # Production health checks
+        echo "Running smoke tests against https://${ALB_URL}"
+        
+        # Health check
+        curl -f "https://${ALB_URL}/health/live" || exit 1
+        echo "✅ Health check passed"
+        
+        # Metrics endpoint
+        curl -f "https://${ALB_URL}/metrics" || exit 1
+        echo "✅ Metrics endpoint accessible"
+        
+        # API documentation (should be disabled in prod)
+        if curl -f "https://${ALB_URL}/docs" 2>/dev/null; then
+          echo "⚠️  Warning: API docs are accessible in production"
+        else
+          echo "✅ API docs are properly disabled in production"
+        fi
+        
+    - name: Notify deployment success
+      if: success()
+      run: |
+        # Send notification to Slack/Teams/etc.
+        echo "🚀 Production deployment successful!"
+        echo "Image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+        echo "Commit: ${{ github.sha }}"
+        
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        echo "❌ Production deployment failed, initiating rollback..."
+        
+        # Get previous task definition
+        PREVIOUS_TASK_DEF=$(aws ecs describe-services \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }} \
+          --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
+          --output text)
+        
+        # Rollback to previous version
+        aws ecs update-service \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --service ${{ env.ECS_SERVICE }} \
+          --task-definition $PREVIOUS_TASK_DEF
+          
+        # Wait for rollback to complete
+        aws ecs wait services-stable \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }}
+          
+        echo "🔄 Rollback completed"
+        
+  # Infrastructure Updates
+  terraform:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[terraform]')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.6.0
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Terraform Format Check
+      working-directory: ./terraform
+      run: terraform fmt -check
+      
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+      
+    - name: Terraform Validate
+      working-directory: ./terraform
+      run: terraform validate
+      
+    - name: Terraform Plan
+      working-directory: ./terraform
+      run: terraform plan -var-file="production.tfvars"
+      
+    - name: Terraform Apply
+      working-directory: ./terraform
+      if: github.event_name == 'push'
+      run: terraform apply -auto-approve -var-file="production.tfvars"

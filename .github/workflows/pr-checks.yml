@@ -1,0 +1,336 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # PR Validation
+  validate-pr:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Validate PR title
+      uses: amannn/action-semantic-pull-request@v5
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        types: |
+          feat
+          fix
+          docs
+          style
+          refactor
+          perf
+          test
+          chore
+          ci
+        requireScope: false
+        
+    - name: Check for breaking changes
+      run: |
+        if git log --format="%s" ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | grep -i "BREAKING CHANGE"; then
+          echo "⚠️ Breaking changes detected in this PR"
+          echo "breaking_change=true" >> $GITHUB_ENV
+        else
+          echo "breaking_change=false" >> $GITHUB_ENV
+        fi
+        
+    - name: Comment on breaking changes
+      if: env.breaking_change == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '⚠️ **Breaking Changes Detected**\n\nThis PR contains breaking changes. Please ensure:\n- [ ] Version is bumped appropriately\n- [ ] Migration guide is updated\n- [ ] Stakeholders are notified'
+          })
+
+  # Code Quality Checks
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      
+    - name: Install dependencies
+      run: poetry install --no-interaction --no-ansi
+      
+    - name: Run pre-commit hooks
+      uses: pre-commit/action@v3.0.0
+      
+    - name: Check code complexity
+      run: |
+        poetry run pip install radon
+        poetry run radon cc src/ --min B
+        poetry run radon mi src/ --min B
+        
+    - name: Check documentation coverage
+      run: |
+        poetry run pip install interrogate
+        poetry run interrogate src/ --verbose --fail-under 80
+        
+    - name: Analyze code with SonarCloud
+      if: github.event.pull_request.head.repo.full_name == github.repository
+      uses: SonarSource/sonarcloud-github-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # Dependency Checks
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for dependency updates
+      run: |
+        pip install poetry
+        poetry show --outdated || true
+        
+    - name: Check for security vulnerabilities
+      run: |
+        pip install safety
+        poetry export -f requirements.txt --output requirements.txt
+        safety check -r requirements.txt
+        
+    - name: License compliance check
+      run: |
+        pip install pip-licenses
+        poetry export -f requirements.txt --output requirements.txt
+        pip install -r requirements.txt
+        pip-licenses --format json --output-file licenses.json
+        # Check for incompatible licenses
+        pip-licenses --format json | jq -r '.[] | select(.License | test("GPL|AGPL|LGPL")) | .Name' > gpl_packages.txt
+        if [ -s gpl_packages.txt ]; then
+          echo "⚠️ GPL-licensed packages found:"
+          cat gpl_packages.txt
+          echo "Please review license compatibility"
+        fi
+
+  # Performance Tests
+  performance:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      
+    - name: Install dependencies
+      run: poetry install --no-interaction --no-ansi
+      
+    - name: Set up environment
+      run: |
+        cp .env.example .env
+        echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_db" >> .env
+        echo "REDIS_URL=redis://localhost:6379/0" >> .env
+        
+    - name: Run performance tests
+      run: |
+        poetry run pytest tests/performance/ -v --benchmark-only --benchmark-json=benchmark.json
+        
+    - name: Performance regression check
+      run: |
+        # Compare with baseline if available
+        if [ -f "baseline_benchmark.json" ]; then
+          poetry run python scripts/compare_benchmarks.py baseline_benchmark.json benchmark.json
+        else
+          echo "No baseline found, current results will be baseline"
+          cp benchmark.json baseline_benchmark.json
+        fi
+        
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark.json
+
+  # Integration Tests
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Build test environment
+      run: |
+        docker-compose -f docker-compose.test.yml up -d
+        
+    - name: Wait for services
+      run: |
+        timeout 300 bash -c 'until curl -f http://localhost:8000/health/live; do sleep 5; done'
+        
+    - name: Run integration tests
+      run: |
+        docker-compose -f docker-compose.test.yml exec -T resume-analyzer \
+          pytest tests/integration/ -v --junit-xml=integration-results.xml
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        docker-compose -f docker-compose.test.yml down -v
+        
+    - name: Upload integration test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: integration-test-results
+        path: integration-results.xml
+
+  # Size and Complexity Analysis
+  size-analysis:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Analyze code size changes
+      run: |
+        # Count lines of code
+        echo "## Code Size Analysis" >> size_report.md
+        echo "" >> size_report.md
+        
+        # Current PR stats
+        PR_ADDITIONS=$(git diff --numstat origin/main...HEAD | awk '{sum += $1} END {print sum}')
+        PR_DELETIONS=$(git diff --numstat origin/main...HEAD | awk '{sum += $2} END {print sum}')
+        
+        echo "- Lines added: $PR_ADDITIONS" >> size_report.md
+        echo "- Lines deleted: $PR_DELETIONS" >> size_report.md
+        echo "- Net change: $((PR_ADDITIONS - PR_DELETIONS))" >> size_report.md
+        echo "" >> size_report.md
+        
+        # File changes
+        echo "### Modified Files:" >> size_report.md
+        git diff --name-only origin/main...HEAD | while read file; do
+          if [ -f "$file" ]; then
+            additions=$(git diff origin/main...HEAD -- "$file" | grep "^+" | wc -l)
+            deletions=$(git diff origin/main...HEAD -- "$file" | grep "^-" | wc -l)
+            echo "- $file: +$additions/-$deletions" >> size_report.md
+          fi
+        done
+        
+    - name: Comment size analysis
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const sizeReport = fs.readFileSync('size_report.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: sizeReport
+          });
+
+  # Documentation Check
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Check for documentation updates
+      run: |
+        # Check if code changes require doc updates
+        if git diff --name-only origin/main...HEAD | grep -E "(src/|README|CHANGELOG)"; then
+          echo "Code changes detected, checking for documentation updates..."
+          
+          if ! git diff --name-only origin/main...HEAD | grep -E "(\.md$|docs/)"; then
+            echo "⚠️ Code changes detected but no documentation updates found"
+            echo "Consider updating:"
+            echo "- README.md"
+            echo "- API documentation"
+            echo "- CHANGELOG.md"
+            echo "docs_warning=true" >> $GITHUB_ENV
+          fi
+        fi
+        
+    - name: Comment on missing documentation
+      if: env.docs_warning == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '📝 **Documentation Check**\n\nCode changes detected but no documentation updates found.\n\nConsider updating:\n- [ ] README.md\n- [ ] API documentation\n- [ ] CHANGELOG.md\n- [ ] Inline code comments'
+          })
+
+  # Final Status Check
+  pr-status:
+    runs-on: ubuntu-latest
+    needs: [validate-pr, code-quality, dependency-check, performance, integration, size-analysis, docs-check]
+    if: always()
+    steps:
+    - name: Check all jobs status
+      run: |
+        if [[ "${{ needs.validate-pr.result }}" == "success" && \
+              "${{ needs.code-quality.result }}" == "success" && \
+              "${{ needs.dependency-check.result }}" == "success" && \
+              "${{ needs.performance.result }}" == "success" && \
+              "${{ needs.integration.result }}" == "success" ]]; then
+          echo "✅ All PR checks passed!"
+          exit 0
+        else
+          echo "❌ Some PR checks failed"
+          echo "validate-pr: ${{ needs.validate-pr.result }}"
+          echo "code-quality: ${{ needs.code-quality.result }}"
+          echo "dependency-check: ${{ needs.dependency-check.result }}"
+          echo "performance: ${{ needs.performance.result }}"
+          echo "integration: ${{ needs.integration.result }}"
+          exit 1
+        fi
