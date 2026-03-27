@@ -1,4 +1,5 @@
 # Resume Analyzer
+<img width="497" height="475" alt="Screenshot 2026-03-24 at 6 29 25 AM" src="https://github.com/user-attachments/assets/a6750618-dd55-46ce-9a4d-f10b7149fad0" />
 
 An AI agent-based resume analysis system built with FastAPI, featuring automated parsing, job matching, and feedback generation using advanced LLM technology.
 
